@@ -77,6 +77,7 @@ impl ApiResponse for Bcs {
                     schema: Self::schema_ref(),
                 }],
                 headers: vec![],
+                status_range: None,
             }],
         }
     }
