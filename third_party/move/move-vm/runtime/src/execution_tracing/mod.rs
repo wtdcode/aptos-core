@@ -4,7 +4,7 @@
 //! Defines trace types and ability to replay traces after execution.
 
 mod recorders;
-pub use recorders::{FullTraceRecorder, NoOpTraceRecorder, TraceRecorder};
+pub use recorders::*;
 
 mod trace;
 pub use trace::Trace;

@@ -6,7 +6,7 @@ use crate::{
     access_control::AccessControlState,
     config::VMConfig,
     data_cache::MoveVmDataCache,
-    execution_tracing::TraceRecorder,
+    execution_tracing::*,
     frame::Frame,
     frame_type_cache::{FrameTypeCache, PerInstructionCache},
     interpreter_caches::InterpreterFunctionCaches,
@@ -383,6 +383,7 @@ where
             .enter_function(&current_frame, &current_frame.function)
             .map_err(|e| self.set_location(e))?;
 
+        trace_recorder.open_frame(&make_frame_info(&current_frame));
         trace_recorder.record_entrypoint(current_frame.function.as_ref());
         loop {
             let exit_code = current_frame
@@ -397,6 +398,7 @@ where
 
             match exit_code {
                 ExitCode::Return => {
+                    trace_recorder.close_frame(&make_frame_info(&current_frame));
                     let non_ref_vals = current_frame.locals.drop_all_values();
 
                     gas_meter
@@ -513,6 +515,7 @@ where
                             &function,
                             ClosureMask::empty(),
                             vec![],
+                            trace_recorder,
                         )?;
                         trace_recorder.record_successful_instruction(&Instruction::Call(fh_idx));
                         if dispatched {
@@ -530,6 +533,7 @@ where
                         frame_cache,
                         ClosureMask::empty(),
                         vec![],
+                        trace_recorder
                     )?;
                     trace_recorder.record_successful_instruction(&Instruction::Call(fh_idx));
                 },
@@ -617,6 +621,7 @@ where
                             &function,
                             ClosureMask::empty(),
                             vec![],
+                            trace_recorder,
                         )?;
                         trace_recorder
                             .record_successful_instruction(&Instruction::CallGeneric(idx));
@@ -635,6 +640,7 @@ where
                         frame_cache,
                         ClosureMask::empty(),
                         vec![],
+                        trace_recorder
                     )?;
                     trace_recorder.record_successful_instruction(&Instruction::CallGeneric(idx));
                 },
@@ -714,6 +720,7 @@ where
                             &callee,
                             mask,
                             captured_vec,
+                            trace_recorder,
                         )?;
                         // If we call a dispatchable native, we need to record first the closure
                         // call, and then the target where it redirects to (which at this point
@@ -740,6 +747,7 @@ where
                             frame_cache,
                             mask,
                             captured_vec,
+                            trace_recorder
                         )?;
                         trace_recorder
                             .record_successful_instruction(&Instruction::CallClosure(sig_idx));
@@ -856,6 +864,7 @@ where
         frame_cache: Rc<RefCell<FrameTypeCache>>,
         mask: ClosureMask,
         captured: Vec<Value>,
+        tracer: &mut impl TraceRecorder,
     ) -> VMResult<()> {
         self.reentrancy_checker
             .enter_function(
@@ -886,6 +895,7 @@ where
             .map_err(|e| self.set_location(e))?;
 
         std::mem::swap(current_frame, &mut frame);
+        tracer.open_frame(&make_frame_info(current_frame));
         self.call_stack.push(frame).map_err(|frame| {
             let err = PartialVMError::new(StatusCode::CALL_STACK_OVERFLOW);
             let err = set_err_info!(frame, err);
@@ -975,6 +985,7 @@ where
         function: &LoadedFunction,
         mask: ClosureMask,
         captured: Vec<Value>,
+        trace_recorder: &mut impl TraceRecorder,
     ) -> VMResult<bool> {
         self.call_native_impl::<RTTCheck, RTRCheck>(
             current_frame,
@@ -986,6 +997,7 @@ where
             function,
             mask,
             captured,
+            trace_recorder,
         )
         .map_err(|e| match function.module_id() {
             Some(id) => {
@@ -1016,6 +1028,7 @@ where
         function: &LoadedFunction,
         mask: ClosureMask,
         mut captured: Vec<Value>,
+        trace_recorder: &mut impl TraceRecorder,
     ) -> PartialVMResult<bool> {
         let ty_builder = &self.vm_config.ty_builder;
 
@@ -1206,6 +1219,7 @@ where
                     frame_cache,
                     ClosureMask::empty(),
                     vec![],
+                    trace_recorder
                 )
                 .map_err(|err| err.to_partial())?;
                 Ok(true)
@@ -1755,6 +1769,10 @@ impl Stack {
         }
     }
 
+    pub fn view(&self) -> MoveTracerStackView<'_> {
+        MoveTracerStackView { values: &self.value }
+    }
+
     /// Push a `Value` on the stack if the max stack size has not been reached. Abort execution
     /// otherwise.
     // note(inline): increases function size 25%, DOES NOT improve performance, do not inline.
@@ -1915,6 +1933,64 @@ enum ExitCode {
 }
 
 impl Frame {
+    fn tracer_instruction_extra_info(
+        &self,
+        instruction: &Instruction,
+    ) -> (Option<MoveTracerExtraInfo>, InstructionExtraData) {
+        use MoveTracerExtraInfo as Info;
+        match instruction {
+            Instruction::Pack(sd_idx) => (
+                Some(Info::Pack(self.field_count(*sd_idx) as usize)),
+                InstructionExtraData::None,
+            ),
+            Instruction::PackGeneric(si_idx) => (
+                Some(Info::PackGeneric(
+                    self.field_instantiation_count(*si_idx) as usize,
+                )),
+                InstructionExtraData::None,
+            ),
+            Instruction::PackVariant(idx) => {
+                let info = self.get_struct_variant_at(*idx);
+                (
+                    Some(Info::PackVariant(info.field_count as usize)),
+                    InstructionExtraData::StructVariant(info.clone()),
+                )
+            },
+            Instruction::PackVariantGeneric(si_idx) => {
+                let info = self.get_struct_variant_instantiation_at(*si_idx);
+                (
+                    Some(Info::PackVariantGeneric(info.field_count as usize)),
+                    InstructionExtraData::StructVariant(info.clone()),
+                )
+            },
+            Instruction::Unpack(sd_idx) => (
+                Some(Info::Unpack(self.field_count(*sd_idx) as usize)),
+                InstructionExtraData::None,
+            ),
+            Instruction::UnpackGeneric(si_idx) => (
+                Some(Info::UnpackGeneric(
+                    self.field_instantiation_count(*si_idx) as usize,
+                )),
+                InstructionExtraData::None,
+            ),
+            Instruction::UnpackVariant(sd_idx) => {
+                let info = self.get_struct_variant_at(*sd_idx);
+                (
+                    Some(Info::UnpackVariant(info.field_count as usize)),
+                    InstructionExtraData::StructVariant(info.clone()),
+                )
+            },
+            Instruction::UnpackVariantGeneric(si_idx) => {
+                let info = self.get_struct_variant_instantiation_at(*si_idx);
+                (
+                    Some(Info::UnpackVariantGeneric(info.field_count as usize)),
+                    InstructionExtraData::StructVariant(info.clone()),
+                )
+            },
+            _ => (None, InstructionExtraData::None),
+        }
+    }
+
     /// Execute a Move function until a return or a call opcode is found.
     fn execute_code<RTTCheck: RuntimeTypeCheck, RTRCheck: RuntimeRefCheck>(
         &mut self,
@@ -1965,6 +2041,14 @@ impl Frame {
         let code = self.function.code();
         loop {
             for instruction in &code[self.pc as usize..] {
+                let (extra_info, mut instruction_extra) =
+                    self.tracer_instruction_extra_info(instruction);
+                trace_recorder.before_instruction(&make_instruction_context(
+                    self,
+                    instruction,
+                    &interpreter.operand_stack,
+                    extra_info,
+                ));
                 trace!(
                     &self.function,
                     &self.locals,

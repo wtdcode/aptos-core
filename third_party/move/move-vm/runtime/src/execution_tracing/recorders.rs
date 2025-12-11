@@ -12,10 +12,142 @@ use fxhash::FxHasher64;
 use move_core_types::function::ClosureMask;
 use move_vm_types::instr::Instruction;
 use std::hash::{Hash, Hasher};
+use crate::loader::StructVariantInfo;
+use crate::reentrancy_checker::CallType;
+use crate::frame::Frame;
+use crate::interpreter::Stack;
+use move_vm_types::loaded_data::runtime_types::Type;
+use move_vm_types::values::Locals;
+use move_vm_types::values::Value;
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoveTracerCallType {
+    Regular,
+    NativeDynamicDispatch,
+    ClosureDynamicDispatch,
+}
+
+impl From<CallType> for MoveTracerCallType {
+    fn from(value: CallType) -> Self {
+        match value {
+            CallType::Regular => MoveTracerCallType::Regular,
+            CallType::NativeDynamicDispatch => MoveTracerCallType::NativeDynamicDispatch,
+            CallType::ClosureDynamicDispatch => MoveTracerCallType::ClosureDynamicDispatch,
+        }
+    }
+}
+
+pub struct MoveTracerFrameInfo<'a> {
+    pub function: &'a LoadedFunction,
+    pub call_type: MoveTracerCallType,
+    pub locals: &'a Locals,
+    pub param_tys: &'a [Type],
+    pub return_tys: &'a [Type],
+    pub is_native: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct MoveTracerStackView<'a> {
+    pub values: &'a [Value],
+}
+
+impl<'a> MoveTracerStackView<'a> {
+    pub fn values(&self) -> &'a [Value] {
+        self.values
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn last_n(&self, n: usize) -> Option<&'a [Value]> {
+        if n > self.values.len() {
+            None
+        } else {
+            Some(&self.values[(self.values.len() - n)..])
+        }
+    }
+}
+
+pub struct MoveTracerInstructionContext<'a> {
+    pub frame: MoveTracerFrameInfo<'a>,
+    pub pc: u16,
+    pub instruction: &'a Instruction,
+    pub operand_stack: MoveTracerStackView<'a>,
+    pub extra: Option<MoveTracerExtraInfo>,
+}
+
+pub trait MoveTracer {
+    fn open_frame(&mut self, _frame: &MoveTracerFrameInfo<'_>) {}
+    fn close_frame(&mut self, _frame: &MoveTracerFrameInfo<'_>) {}
+    fn before_instruction(&mut self, _instruction: &MoveTracerInstructionContext<'_>) {}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoveTracerExtraInfo {
+    Pack(usize),
+    PackGeneric(usize),
+    PackVariant(usize),
+    PackVariantGeneric(usize),
+    Unpack(usize),
+    UnpackGeneric(usize),
+    UnpackVariant(usize),
+    UnpackVariantGeneric(usize),
+}
+
+#[derive(Default)]
+pub struct NoopTracer;
+
+impl MoveTracer for NoopTracer {}
+
+pub enum InstructionExtraData {
+    None,
+    StructVariant(StructVariantInfo),
+}
+
+impl InstructionExtraData {
+    pub fn take_struct_variant(&mut self) -> Option<StructVariantInfo> {
+        match std::mem::replace(self, InstructionExtraData::None) {
+            InstructionExtraData::StructVariant(info) => Some(info),
+            InstructionExtraData::None => None,
+        }
+    }
+}
+
+pub fn make_frame_info(frame: &Frame) -> MoveTracerFrameInfo<'_> {
+    MoveTracerFrameInfo {
+        function: &frame.function,
+        call_type: frame.call_type().into(),
+        locals: &frame.locals,
+        param_tys: frame.function.param_tys(),
+        return_tys: frame.function.return_tys(),
+        is_native: frame.function.is_native(),
+    }
+}
+
+pub fn make_instruction_context<'a>(
+    frame: &'a Frame,
+    instruction: &'a Instruction,
+    operand_stack: &'a Stack,
+    extra: Option<MoveTracerExtraInfo>,
+) -> MoveTracerInstructionContext<'a> {
+    MoveTracerInstructionContext {
+        frame: make_frame_info(frame),
+        pc: frame.pc,
+        instruction,
+        operand_stack: operand_stack.view(),
+        extra,
+    }
+}
 
 /// Interface for recording the trace at runtime. It is sufficient to record branch decisions as
 /// well as dynamic function calls originating from closures.
-pub trait TraceRecorder {
+pub trait TraceRecorder: MoveTracer {
     /// Returns true if the trace is being collected.
     fn is_enabled(&self) -> bool;
 
@@ -117,6 +249,22 @@ impl TraceRecorder for FullTraceRecorder {
         self.calls
             .push(DynamicCall::Closure(function.clone(), mask));
     }
+}
+
+impl MoveTracer for FullTraceRecorder {
+    fn open_frame(&mut self, _frame: &MoveTracerFrameInfo<'_>) {}
+
+    fn close_frame(&mut self, _frame: &MoveTracerFrameInfo<'_>) {}
+
+    fn before_instruction(&mut self, _instruction: &MoveTracerInstructionContext<'_>) {}
+}
+
+impl MoveTracer for NoOpTraceRecorder {
+    fn open_frame(&mut self, _frame: &MoveTracerFrameInfo<'_>) {}
+
+    fn close_frame(&mut self, _frame: &MoveTracerFrameInfo<'_>) {}
+
+    fn before_instruction(&mut self, _instruction: &MoveTracerInstructionContext<'_>) {}
 }
 
 /// No-op instance of recorder in case there is no need to collect execution trace at runtime.
