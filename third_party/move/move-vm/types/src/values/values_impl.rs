@@ -129,7 +129,7 @@ pub enum Value {
 /// Except when not owned by the VM stack, a container always lives inside an Rc<RefCell<>>,
 /// making it possible to be shared by references.
 #[derive(Debug)]
-pub(crate) enum Container {
+pub enum Container {
     Locals(Rc<RefCell<Vec<Value>>>),
     Vec(Rc<RefCell<Vec<Value>>>),
     Struct(Rc<RefCell<Vec<Value>>>),
@@ -153,7 +153,7 @@ pub(crate) enum Container {
 /// or in global storage. In the latter case, it also keeps a status flag indicating whether
 /// the container has been possibly modified.
 #[derive(Debug)]
-pub(crate) enum ContainerRef {
+pub enum ContainerRef {
     Local(Container),
     Global {
         status: Rc<RefCell<GlobalDataStatus>>,
@@ -165,7 +165,7 @@ pub(crate) enum ContainerRef {
 /// Clean - the data was only read.
 /// Dirty - the data was possibly modified.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum GlobalDataStatus {
+pub enum GlobalDataStatus {
     Clean,
     Dirty,
 }
@@ -173,9 +173,9 @@ pub(crate) enum GlobalDataStatus {
 /// A Move reference pointing to an element in a container. Used only for primitive types, e.g.,
 /// vectors of integers or an integer field in a struct.
 #[derive(Debug)]
-pub(crate) struct IndexedRef {
-    idx: usize,
-    container_ref: ContainerRef,
+pub struct IndexedRef {
+    pub idx: usize,
+    pub container_ref: ContainerRef,
 }
 
 /// An umbrella enum for references. It is used to hide the internals of the public type
@@ -4677,14 +4677,14 @@ pub mod debug {
 
 // Wrapper around value with additional information which can be used by the
 // serializer.
-pub(crate) struct SerializationReadyValue<'c, 'l, 'v, L, V> {
+pub struct SerializationReadyValue<'c, 'l, 'v, L, V> {
     // Contains the current (possibly custom) serialization context.
-    pub(crate) ctx: &'c ValueSerDeContext<'c>,
+    pub ctx: &'c ValueSerDeContext<'c>,
     // Layout for guiding serialization.
-    pub(crate) layout: &'l L,
+    pub layout: &'l L,
     // Value to serialize.
-    pub(crate) value: &'v V,
-    pub(crate) depth: u64,
+    pub value: &'v V,
+    pub depth: u64,
 }
 
 fn invariant_violation<S: serde::Serializer>(message: String) -> S::Error {
@@ -4944,11 +4944,11 @@ impl serde::Serialize for SerializationReadyValue<'_, '_, '_, MoveStructLayout, 
 
 // Seed used by deserializer to ensure there is information about the value
 // being deserialized.
-pub(crate) struct DeserializationSeed<'c, L> {
+pub struct DeserializationSeed<'c, L> {
     // Holds extensions external to the deserializer.
-    pub(crate) ctx: &'c ValueSerDeContext<'c>,
+    pub ctx: &'c ValueSerDeContext<'c>,
     // Layout to guide deserialization.
-    pub(crate) layout: L,
+    pub layout: L,
 }
 
 impl<'d> serde::de::DeserializeSeed<'d> for DeserializationSeed<'_, &MoveTypeLayout> {
