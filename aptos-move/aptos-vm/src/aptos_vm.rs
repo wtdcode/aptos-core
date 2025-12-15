@@ -136,6 +136,9 @@ use move_core_types::{
     },
 };
 use move_vm_metrics::{Timer, VM_TIMER};
+use move_vm_runtime::tracing::{
+    begin_pc_capture, begin_shift_capture, end_pc_capture_take, end_shift_capture_take,
+};
 use move_vm_runtime::{
     check_dependencies_and_charge_gas, dispatch_loader,
     execution_tracing::{FullTraceRecorder, NoOpTraceRecorder, TraceRecorder},
@@ -152,6 +155,7 @@ use std::{
     cmp::{max, min},
     collections::{BTreeMap, BTreeSet},
     marker::Sync,
+    panic::{catch_unwind, AssertUnwindSafe},
     str::FromStr,
     sync::Arc,
 };
@@ -2184,12 +2188,24 @@ impl AptosVM {
         make_gas_meter: F,
         auxiliary_info: &AuxiliaryInfo,
         mut trace_recorder: impl TraceRecorder,
-    ) -> Result<(VMStatus, VMOutput, G), VMStatus>
+    ) -> Result<
+        (
+            VMStatus,
+            VMOutput,
+            Vec<u64>,
+            Vec<move_vm_runtime::tracing::ShiftEvent>,
+            G,
+        ),
+        VMStatus,
+    >
     where
         C: AptosCodeStorage + BlockSynchronizationKillSwitch,
         G: AptosGasMeter,
         F: FnOnce(u64, VMGasParameters, StorageGasParameters, bool, Gas, &'a C) -> G,
     {
+        // Guard against Rust-level panics in the VM dispatch path
+        begin_pc_capture();
+        begin_shift_capture();
         let txn_metadata = TransactionMetadata::new(txn, auxiliary_info);
 
         let is_approved_gov_script = is_approved_gov_script(resolver, txn, &txn_metadata);
@@ -2212,18 +2228,54 @@ impl AptosVM {
             initial_balance,
             code_storage,
         );
-        let (status, output) = self.execute_user_transaction_impl(
-            resolver,
-            code_storage,
-            txn,
-            txn_metadata,
-            is_approved_gov_script,
-            log_context,
-            &mut gas_meter,
-            trace_recorder,
-        );
 
-        Ok((status, output, gas_meter))
+        let inner = || -> Result<(VMStatus, VMOutput), move_core_types::vm_status::VMStatus> {
+            let (status, output) = self.execute_user_transaction_impl(
+                resolver,
+                code_storage,
+                txn,
+                txn_metadata,
+                is_approved_gov_script,
+                log_context,
+                &mut gas_meter,
+                trace_recorder,
+            );
+            let storage_change_set = match output.clone().into_transaction_output() {
+                Ok(cs) => cs,
+                Err(_e) => {
+                    return Err(move_core_types::vm_status::VMStatus::Error {
+                        status_code: move_core_types::vm_status::StatusCode::UNKNOWN_STATUS,
+                        sub_status: None,
+                        message: Some("convert change set failed".to_string()),
+                    });
+                },
+            };
+            Ok((status, output))
+        };
+
+        let pcs = end_pc_capture_take();
+        let shifts = end_shift_capture_take();
+        let result = catch_unwind(AssertUnwindSafe(inner));
+        match result {
+            Ok(res) => match &res {
+                Ok(ok_result) => {
+                    return Ok((
+                        ok_result.0.clone(),
+                        ok_result.1.clone(),
+                        pcs,
+                        shifts,
+                        gas_meter,
+                    ))
+                },
+                Err(vm_status) => return Err(vm_status.clone()),
+            },
+            Err(vm_status) => {
+                return Err(VMStatus::error(
+                    StatusCode::UNKNOWN_STATUS,
+                    Some(format!("VM panicked: {:?}", vm_status)),
+                ))
+            },
+        }
     }
 
     /// Alternative entrypoint for user transaction execution that allows customization based on
