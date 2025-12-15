@@ -25,6 +25,7 @@ use crate::{
         ty_layout_converter::LayoutConverter,
     },
     trace, LoadedFunction, RuntimeEnvironment,
+    tracing::{record_shift_event, ShiftOp},
 };
 use fail::fail_point;
 use itertools::Itertools;
@@ -2741,12 +2742,14 @@ impl Frame {
                         gas_meter.charge_simple_instr(S::Shl)?;
                         let rhs = interpreter.operand_stack.pop_as::<u8>()?;
                         let lhs = interpreter.operand_stack.pop()?;
+                        record_shift_event(&self.function, self.pc, ShiftOp::Shl, &lhs, rhs);
                         interpreter.operand_stack.push(lhs.shl_checked(rhs)?)?;
                     },
                     Instruction::Shr => {
                         gas_meter.charge_simple_instr(S::Shr)?;
                         let rhs = interpreter.operand_stack.pop_as::<u8>()?;
                         let lhs = interpreter.operand_stack.pop()?;
+                        record_shift_event(&self.function, self.pc, ShiftOp::Shr, &lhs, rhs);
                         interpreter.operand_stack.push(lhs.shr_checked(rhs)?)?;
                     },
                     Instruction::Or => {

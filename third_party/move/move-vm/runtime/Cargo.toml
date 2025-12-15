@@ -49,7 +49,7 @@ test-case = { workspace = true }
 
 [features]
 default = [
-    "inline-callstack",
+    "inline-callstack", "debugging",
 ]
 profiling = ["move-vm-profiler/probe-profiler"]
 testing = []
