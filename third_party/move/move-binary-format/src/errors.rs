@@ -91,6 +91,7 @@ struct VMError_ {
 impl VMError {
     #[cold]
     pub fn into_vm_status(self) -> VMStatus {
+        println!("Converting VMError{:?} to VMStatus: {}", *self.0, self.format_test_output(false));
         let VMError_ {
             major_status,
             sub_status,
