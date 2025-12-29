@@ -2179,7 +2179,7 @@ impl AptosVM {
         Ok((status, output, gas_meter))
     }
 
-    pub fn execute_user_payload_no_checking_with_tracer<'a, C, G, F>(
+    pub fn execute_user_payload_no_checking_with_tracer_v1<'a, C, G, F>(
         &self,
         resolver: &'a impl AptosMoveResolver,
         code_storage: &'a C,
@@ -2276,6 +2276,71 @@ impl AptosVM {
                 ))
             },
         }
+    }
+
+    pub fn execute_user_payload_no_checking_with_tracer_v2<'a, C, G, F>(
+        &self,
+        resolver: &'a impl AptosMoveResolver,
+        code_storage: &'a C,
+        txn: &SignedTransaction,
+        log_context: &AdapterLogSchema,
+        make_gas_meter: F,
+        auxiliary_info: &AuxiliaryInfo,
+        mut trace_recorder: impl TraceRecorder,
+    ) -> Result<(VMStatus, VMOutput, G), VMStatus>
+    where
+        C: AptosCodeStorage + BlockSynchronizationKillSwitch,
+        G: AptosGasMeter,
+        F: FnOnce(u64, VMGasParameters, StorageGasParameters, bool, Gas, &'a C) -> G,
+    {
+        let txn_metadata = TransactionMetadata::new(txn, auxiliary_info);
+
+        let is_approved_gov_script = is_approved_gov_script(resolver, txn, &txn_metadata);
+
+        let vm_params = self.gas_params(log_context)?.vm.clone();
+
+        let initial_balance = if self.features().is_account_abstraction_enabled()
+            || self.features().is_derivable_account_abstraction_enabled()
+        {
+            vm_params.txn.max_aa_gas.min(txn.max_gas_amount().into())
+        } else {
+            txn.max_gas_amount().into()
+        };
+
+        let mut gas_meter = make_gas_meter(
+            self.gas_feature_version(),
+            vm_params,
+            self.storage_gas_params(log_context)?.clone(),
+            is_approved_gov_script,
+            initial_balance,
+            code_storage,
+        );
+
+        let (status, output) = if self.should_perform_async_runtime_checks_for_txn(txn) {
+            self.execute_user_transaction_impl(
+                resolver,
+                code_storage,
+                txn,
+                txn_metadata,
+                is_approved_gov_script,
+                log_context,
+                &mut gas_meter,
+                trace_recorder,
+            )
+        } else {
+            self.execute_user_transaction_impl(
+                resolver,
+                code_storage,
+                txn,
+                txn_metadata,
+                is_approved_gov_script,
+                log_context,
+                &mut gas_meter,
+                NoOpTraceRecorder,
+            )
+        };
+
+        Ok((status, output, gas_meter))
     }
 
     /// Alternative entrypoint for user transaction execution that allows customization based on
